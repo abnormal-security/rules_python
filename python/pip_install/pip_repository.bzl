@@ -226,13 +226,6 @@ def _create_repository_execution_environment(rctx):
 
     return env
 
-_BUILD_FILE_CONTENTS = """\
-package(default_visibility = ["//visibility:public"])
-
-# Ensure the `requirements.bzl` source can be accessed by stardoc, since users load() from it
-exports_files(["requirements.bzl"])
-"""
-
 def locked_requirements_label(ctx, attr):
     """Get the preferred label for a locked requirements file based on platform.
 
@@ -314,23 +307,50 @@ def _pip_repository_impl(rctx):
     rctx.file(annotations_file, json.encode_indent(annotations, indent = " " * 4))
 
     requirements_txt = locked_requirements_label(rctx, rctx.attr)
-    args = [
-        python_interpreter,
-        "-m",
-        "python.pip_install.tools.lock_file_generator.lock_file_generator",
-        "--requirements_lock",
-        rctx.path(requirements_txt),
-        "--requirements_lock_label",
-        str(requirements_txt),
-        # pass quiet and timeout args through to child repos.
-        "--quiet",
-        str(rctx.attr.quiet),
-        "--timeout",
-        str(rctx.attr.timeout),
-        "--annotations",
-        annotations_file,
-        "--bzlmod",
-        str(rctx.attr.bzlmod).lower(),
+    content = rctx.read(requirements_txt)
+    parsed_requirements_txt = parse_requirements(content)
+
+    # Apply name normalizations to the composite libs def once
+    composite_libs = {
+        _clean_pkg_name(name): [_clean_pkg_name(it) for it in components]
+        for name, components in rctx.attr.composite_libs.items()
+    }
+
+    # Ditto for requirements defs
+    requirements = {
+        _clean_pkg_name(name): requirement
+        for name, requirement in parsed_requirements_txt.requirements
+    }
+
+    # Map normalized package names to a composite
+    composite_mapping = {
+        name: composite_name
+        for composite_name, names in composite_libs.items()
+        for name in names
+    }
+
+    # Normal packages are defined by a single requirement.
+    # We will deal with composites shortly.
+    normal_packages = [
+        (name, requirement)
+        for name, requirement in requirements.items()
+        if name not in composite_mapping
+    ]
+
+    # Composite packages are a cluster which can only be depended on together
+    composite_packages = {
+        _clean_pkg_name(composite_name): [
+            (rname, requirements[rname])
+            for rname in composite_components
+        ]
+        for composite_name, composite_components in rctx.attr.composite_libs.items()
+    }
+
+    bzl_packages = sorted([name for name, _ in requirements.items()])
+
+    imports = [
+        'load("@rules_python//python:defs.bzl", "py_library")',
+        'load("@rules_python//python/pip_install:pip_repository.bzl", "whl_library")',
     ]
 
     args += ["--python_interpreter", _get_python_interpreter_attr(rctx)]
@@ -479,6 +499,18 @@ wheels are fetched/built only for the targets specified by 'build/run/test'.
         allow_single_file = True,
         doc = "Override the requirements_lock attribute when the host platform is Windows",
     ),
+    "composite_libs": attr.string_list_dict(
+        doc = "Groups of requirements which represent dependency cycles and must be treated as composites.",
+    ),
+    "_requirements_template": attr.label(
+        default = ":pip_repository_requirements.bzl.tmpl",
+    ),
+    "_build_template": attr.label(
+        default = ":pip_repository_build.bazel.tmpl",
+    ),
+    "_lib_template": attr.label(
+        default = ":pip_repository_lib.bzl.tmpl",
+    ),
 }
 
 pip_repository_attrs.update(**common_attrs)
@@ -547,6 +579,8 @@ def _whl_library_impl(rctx):
             "--annotation",
             rctx.path(rctx.attr.annotation),
         ])
+    for d in rctx.attr.skip_deps:
+        args.extend(["--skip", d])
 
     args = _parse_optional_attrs(rctx, args)
 
@@ -578,6 +612,10 @@ whl_library_attrs = {
     "requirement": attr.string(
         mandatory = True,
         doc = "Python requirement string describing the package to make available",
+    ),
+    "skip_deps": attr.string_list(
+        doc = "List of requirements to skip due to clustering",
+        default = [],
     ),
 }
 

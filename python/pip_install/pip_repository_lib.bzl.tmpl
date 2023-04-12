@@ -1,0 +1,14 @@
+load("@rules_python//python:defs.bzl", "py_library")
+load(":requirements.bzl", "requirement", "whl_requirement", "requirement_clusters")
+
+
+def install_clusters():
+    for cname, components in requirement_clusters.items():
+        py_library(
+            name = cname,
+            deps = [requirement(c, use_clusters=False) for c, _ in components]
+        )
+        native.filegroup(
+            name = "whl_" + cname,
+            data = [whl_requirement(c, use_clusters=False) for c, _ in components]
+        )
