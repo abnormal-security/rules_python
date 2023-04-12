@@ -22,6 +22,12 @@ load("@rules_python//python:pip.bzl", "pip_parse")
 pip_parse(
     name = "pip",
     python_interpreter_target = interpreter,
+    requirement_clusters = {
+        "vbap": [
+            "oletools",
+            "pcodedmp",
+        ],
+    },
     requirements_lock = "//:requirements.txt",
 )
 

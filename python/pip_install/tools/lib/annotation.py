@@ -23,7 +23,6 @@ class Annotation(OrderedDict):
     """A python representation of `@rules_python//python:pip.bzl%package_annotation`"""
 
     def __init__(self, content: Dict[str, Any]) -> None:
-
         missing = []
         ordered_content = OrderedDict()
         for field in (

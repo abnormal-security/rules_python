@@ -436,13 +436,49 @@ def _pip_repository_impl(rctx):
     content = rctx.read(requirements_txt)
     parsed_requirements_txt = parse_requirements(content)
 
-    packages = [(_clean_pkg_name(name), requirement) for name, requirement in parsed_requirements_txt.requirements]
+    # Apply name normalizations to the requirement specifications.
+    requirements = {
+        _clean_pkg_name(name): requirement
+        for name, requirement in parsed_requirements_txt.requirements
+    }
 
-    bzl_packages = sorted([name for name, _ in packages])
+    # Apply name normalizations to the clustered library specifications. This
+    # ensures we can join cluster specifications against requirement
+    # specifications consistently.
+    requirement_clusters = {
+        _clean_pkg_name(name): [_clean_pkg_name(it) for it in components]
+        for name, components in rctx.attr.requirement_clusters.items()
+    }
 
-    imports = [
-        'load("@rules_python//python/pip_install:pip_repository.bzl", "whl_library")',
+    # Create an index mapping clustered requirements to their cluster. This both
+    # lets us determine which cluster contains a requirement, and which
+    # requirements ARE NOT clustered.
+    cluster_mapping = {
+        requirement: cluster_name
+        for cluster_name, requirements in requirement_clusters.items()
+        for requirement in requirements
+    }
+
+    # Format requirement specifications into groups which will be fed to
+    # `whl_library()` together by `install_deps()`. To simplify the
+    # `install_deps()` machinery, unclustered requirements are treated as
+    # anonymous clusters of size one.
+    clustered_requirement_specifications = [
+        (
+            _clean_pkg_name(cluster_name),
+            [(rname, requirements[rname]) for rname in cluster_components],
+        )
+        for cluster_name, cluster_components in requirement_clusters.items()
+    ] + [
+        (
+            None,
+            [(name, requirement)],
+        )
+        for name, requirement in requirements.items()
+        if name not in cluster_mapping
     ]
+
+    bzl_packages = sorted([name for name, _ in requirements.items()])
 
     annotations = {}
     for pkg, annotation in rctx.attr.annotations.items():
@@ -477,8 +513,11 @@ def _pip_repository_impl(rctx):
     if rctx.attr.incompatible_generate_aliases:
         _pkg_aliases(rctx, rctx.attr.name, bzl_packages)
 
-    rctx.file("BUILD.bazel", _BUILD_FILE_CONTENTS)
-    rctx.template("requirements.bzl", rctx.attr._template, substitutions = {
+    rctx.template("BUILD.bazel", rctx.attr._build_template, substitutions = {
+        "%%FOOTER%%": "",
+        "%%NAME%%": rctx.attr.name,
+    })
+    rctx.template("requirements.bzl", rctx.attr._requirements_template, substitutions = {
         "%%ALL_REQUIREMENTS%%": _format_repr_list([
             "@{}//{}".format(rctx.attr.name, p) if rctx.attr.incompatible_generate_aliases else "@{}_{}//:pkg".format(rctx.attr.name, p)
             for p in bzl_packages
@@ -488,20 +527,12 @@ def _pip_repository_impl(rctx):
             for p in bzl_packages
         ]),
         "%%ANNOTATIONS%%": _format_dict(_repr_dict(annotations)),
+        "%%CLUSTERS%%": _format_repr_list(clustered_requirement_specifications),
         "%%CONFIG%%": _format_dict(_repr_dict(config)),
         "%%EXTRA_PIP_ARGS%%": json.encode(options),
-        "%%IMPORTS%%": "\n".join(sorted(imports)),
         "%%NAME%%": rctx.attr.name,
-        "%%PACKAGES%%": _format_repr_list(
-            [
-                ("{}_{}".format(rctx.attr.name, p), r)
-                for p, r in packages
-            ],
-        ),
         "%%REQUIREMENTS_LOCK%%": str(requirements_txt),
     })
-
-    return
 
 common_env = [
     "RULES_PYTHON_PIP_ISOLATED",
@@ -596,6 +627,9 @@ pip_repository_attrs = {
         default = False,
         doc = "Allow generating aliases '@pip//<pkg>' -> '@pip_<pkg>//:pkg'.",
     ),
+    "requirement_clusters": attr.string_list_dict(
+        doc = "Groups of requirements which form dependency cycles and must be treated as clusters.",
+    ),
     "requirements_darwin": attr.label(
         allow_single_file = True,
         doc = "Override the requirements_lock attribute when the host platform is Mac OS",
@@ -616,7 +650,10 @@ wheels are fetched/built only for the targets specified by 'build/run/test'.
         allow_single_file = True,
         doc = "Override the requirements_lock attribute when the host platform is Windows",
     ),
-    "_template": attr.label(
+    "_build_template": attr.label(
+        default = ":pip_repository_build.bazel.tmpl",
+    ),
+    "_requirements_template": attr.label(
         default = ":pip_repository_requirements.bzl.tmpl",
     ),
 }
@@ -687,6 +724,8 @@ def _whl_library_impl(rctx):
             "--annotation",
             rctx.path(rctx.attr.annotation),
         ])
+    for d in rctx.attr.skip_deps:
+        args.extend(["--skip", d])
 
     args = _parse_optional_attrs(rctx, args)
 
@@ -718,6 +757,10 @@ whl_library_attrs = {
     "requirement": attr.string(
         mandatory = True,
         doc = "Python requirement string describing the package to make available",
+    ),
+    "skip_deps": attr.string_list(
+        doc = "List of requirements to skip due to clustering",
+        default = [],
     ),
 }
 

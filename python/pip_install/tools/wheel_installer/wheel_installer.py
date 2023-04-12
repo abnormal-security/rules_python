@@ -195,6 +195,7 @@ def _generate_copy_commands(src, dest, is_executable=False) -> str:
 
 def _generate_build_file_contents(
     name: str,
+    repo_prefix: str,
     dependencies: List[str],
     whl_file_deps: List[str],
     data_exclude: List[str],
@@ -241,6 +242,7 @@ def _generate_build_file_contents(
                 """\
         load("@rules_python//python:defs.bzl", "py_library", "py_binary")
         load("@bazel_skylib//rules:copy_file.bzl", "copy_file")
+        load("@{repo_prefix}//:requirements.bzl", "requirement", "whl_requirement")
 
         package(default_visibility = ["//visibility:public"])
 
@@ -272,6 +274,7 @@ def _generate_build_file_contents(
         )
         """.format(
                     name=name,
+                    repo_prefix=repo_prefix.rstrip("_"),
                     dependencies=",".join(sorted(dependencies)),
                     data_exclude=json.dumps(sorted(data_exclude)),
                     whl_file_label=bazel.WHEEL_FILE_LABEL,
@@ -297,6 +300,7 @@ def _extract_wheel(
     repo_prefix: str,
     installation_dir: Path = Path("."),
     annotation: Optional[annotation.Annotation] = None,
+    skip_deps: List[str] = [],
 ) -> None:
     """Extracts wheel into given directory and creates py_library and filegroup targets.
 
@@ -318,15 +322,11 @@ def _extract_wheel(
     extras_requested = extras[whl.name] if whl.name in extras else set()
     # Packages may create dependency cycles when specifying optional-dependencies / 'extras'.
     # Example: github.com/google/etils/blob/a0b71032095db14acf6b33516bca6d885fe09e35/pyproject.toml#L32.
-    self_edge_dep = set([whl.name])
-    whl_deps = sorted(whl.dependencies(extras_requested) - self_edge_dep)
-
-    sanitised_dependencies = [
-        bazel.sanitised_repo_library_label(d, repo_prefix=repo_prefix) for d in whl_deps
-    ]
-    sanitised_wheel_file_dependencies = [
-        bazel.sanitised_repo_file_label(d, repo_prefix=repo_prefix) for d in whl_deps
-    ]
+    to_skip = {bazel.sanitise_name(it, "") for it in [whl.name] + skip_deps}
+    deps = {bazel.sanitise_name(it, "") for it in whl.dependencies(extras_requested)}
+    whl_deps = sorted(deps - to_skip)
+    sanitised_dependencies = ["requirement(%r)" % d for d in whl_deps]
+    sanitised_wheel_file_dependencies = ["whl_requirement(%r)" % d for d in whl_deps]
 
     entry_points = []
     for name, (module, attribute) in sorted(whl.entry_points().items()):
@@ -370,6 +370,7 @@ def _extract_wheel(
 
         contents = _generate_build_file_contents(
             name=bazel.PY_LIBRARY_LABEL,
+            repo_prefix=repo_prefix,
             dependencies=sanitised_dependencies,
             whl_file_deps=sanitised_wheel_file_dependencies,
             data_exclude=data_exclude,
@@ -396,6 +397,7 @@ def main() -> None:
         type=annotation.annotation_from_str_path,
         help="A json encoded file containing annotations for rendered packages.",
     )
+    parser.add_argument("--skip", action="append", dest="skip_deps", default=[])
     arguments.parse_common_args(parser)
     args = parser.parse_args()
     deserialized_args = dict(vars(args))
@@ -443,6 +445,7 @@ def main() -> None:
         enable_implicit_namespace_pkgs=args.enable_implicit_namespace_pkgs,
         repo_prefix=args.repo_prefix,
         annotation=args.annotation,
+        skip_deps=args.skip_deps,
     )
 
 

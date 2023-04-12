@@ -1,6 +1,8 @@
 load("@bazel_skylib//rules:diff_test.bzl", "diff_test")
 load("@bazel_skylib//rules:write_file.bzl", "write_file")
+load("@rules_python//python:defs.bzl", "py_test")
 load("@rules_python//python:pip.bzl", "compile_pip_requirements")
+load("//:requirements.bzl", "requirement")
 
 # This rule adds a convenient way to update the requirements.txt
 # lockfile based on the requirements.in.
@@ -15,13 +17,15 @@ genrule(
     outs = ["requirements.clean.bzl"],
     cmd = " | ".join([
         "cat $<",
-        # Insert our load statement after the existing one so we don't produce a file with buildifier warnings
-        """sed -e '/^load.*/i\\'$$'\\n''load("@python39//:defs.bzl", "interpreter")'""",
+        # Insert our load statement for the interpreter
+        """sed -e '7 i \\\nload("@python39//:defs.bzl", "interpreter")\n'""",
         # Replace the bazel 6.0.0 specific comment with something that bazel 5.4.0 would produce.
         # This enables this example to be run as a test under bazel 5.4.0.
         """sed -e 's#@//#//#'""",
-        """sed 's#"@python39_.*//:bin/python3"#interpreter#' >$@""",
-    ]),
+        """sed 's#"@python39_.*//:bin/python3"#interpreter#'""",
+        # Stick some buildifiler disables in as needed
+        """sed 's/^def /# buildifier: disable=function-docstring\\\ndef /g'""",
+    ]) + " >$@",
 )
 
 write_file(
@@ -49,4 +53,14 @@ diff_test(
     failure_message = "Please run:  bazel run //:vendor_requirements",
     file1 = "requirements.bzl",
     file2 = ":make_platform_agnostic",
+)
+
+py_test(
+    name = "test",
+    srcs = ["test.py"],
+    deps = [
+        requirement("oletools"),
+        requirement("pcodedmp"),
+        requirement("requests"),
+    ],
 )

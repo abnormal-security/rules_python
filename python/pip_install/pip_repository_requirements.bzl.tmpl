@@ -4,24 +4,42 @@
 from %%REQUIREMENTS_LOCK%%
 """
 
-%%IMPORTS%%
+load("@rules_python//python:defs.bzl", "py_library")
+load("@rules_python//python/pip_install:pip_repository.bzl", "whl_library")
 
 all_requirements = %%ALL_REQUIREMENTS%%
 
 all_whl_requirements = %%ALL_WHL_REQUIREMENTS%%
 
-_packages = %%PACKAGES%%
+# [((cluster_name: str), [(requirement_name: str), (requirement_spec: Any)])]
+_requirement_clusters = %%CLUSTERS%%
+
+_requirement_cluster_mapping = {
+    requirement_name: cluster_name
+    for cluster_name, clustered_requirements in _requirement_clusters
+    for requirement_name, _ in clustered_requirements
+    if cluster_name != None
+}
+
 _config = %%CONFIG%%
+
 _annotations = %%ANNOTATIONS%%
 
 def _clean_name(name):
     return name.replace("-", "_").replace(".", "_").lower()
 
-def requirement(name):
-    return "@%%NAME%%_" + _clean_name(name) + "//:pkg"
+def requirement(name, use_clusters = True):
+    cname = _clean_name(name)
+    if cname in _requirement_cluster_mapping and use_clusters:
+        return "@%%NAME%%//:_cluster_{}_lib_{}".format(_requirement_cluster_mapping[cname], cname)
+    else:
+        return "@%%NAME%%_" + cname + "//:pkg"
 
-def whl_requirement(name):
-    return "@%%NAME%%_" + _clean_name(name) + "//:whl"
+def whl_requirement(name, use_clusters = True):
+    cname = _clean_name(name)
+    if cname in _requirement_cluster_mapping and use_clusters:
+        return "@%%NAME%%//:_cluster_{}_whl_{}".format(_requirement_cluster_mapping[cname], cname)
+    return "@%%NAME%%_" + cname + "//:whl"
 
 def data_requirement(name):
     return "@%%NAME%%_" + _clean_name(name) + "//:data"
@@ -41,12 +59,78 @@ def _get_annotation(requirement):
     return _annotations.get(name)
 
 def install_deps(**whl_library_kwargs):
+    # As a WORKSPACE macro, create the workspaces for required Pip wheels.
+
     whl_config = dict(_config)
     whl_config.update(whl_library_kwargs)
-    for name, requirement in _packages:
-        whl_library(
-            name = name,
-            requirement = requirement,
-            annotation = _get_annotation(requirement),
-            **whl_config
+
+    for _cluster_name, clustered_requirements in _requirement_clusters:
+        # Clustered requirements require a bit more work. Just like normal
+        # requirements we need to call `whl_library`, but we also need to
+        # indicate to `whl_library` that the co-clustered libraries which should
+        # be excluded from dependency enumeration.
+
+        cluster_member_names = [name for name, _spec in clustered_requirements]
+        for name, spec in clustered_requirements:
+            whl_library(
+                name = "%%NAME%%_" + name,
+                requirement = spec,
+                annotation = _get_annotation(spec),
+                skip_deps = cluster_member_names,
+                **whl_config
+            )
+
+def install_clusters(name):
+    # As a BUILD macro, create the libraries and aliases required for clusters.
+    #
+    # For use only from the generated pip repo.
+
+    for cluster_name, clustered_requirements in _requirement_clusters:
+        if not cluster_name:
+            continue
+
+        # Each cluster is really a library which wraps up all the members of the
+        # cluster into a single dominating dependency. Rather than having a
+        # cycle {A <-> B} then we have {C -> A, C -> B} which achieves the same
+        # effect of simultaneously providing A and B.
+        #
+        # Note we have to set `use_clusters=False` here so that we take direct
+        # dependencies on the underlying `A` and `B` `whl_library` targets,
+        # rather than having `requirement()` rewrite the requests for `A` and
+        # `B` back to the cluster library rule.
+
+        lib_name = "_cluster_{}_lib".format(cluster_name)
+        whl_name = "_cluster_{}_whl".format(cluster_name)
+
+        py_library(
+            name = lib_name,
+            deps = [requirement(c, use_clusters = False) for c, _ in clustered_requirements],
         )
+
+        # We have to do the same dance of creating a wrapper rule for whls as well
+        native.filegroup(
+            name = whl_name,
+            data = [whl_requirement(c, use_clusters = False) for c, _ in clustered_requirements],
+        )
+
+        for requirement_name, _ in clustered_requirements:
+            # Previously when a user wrote `requirement("A")`, the `requirement`
+            # macro would provide the label for the implementing workspace. Each
+            # library having a unique implementing workspace, a user could write
+            # `deps = [requirement("A"), requirement("B")]` and all would be
+            # well. Now however `requirement("A")` and `requirement("B")` mean
+            # `C` (the `py_library(name=cluster_name)` above), which would be a
+            # duplicate dependency which Bazel also doesn't support.
+            #
+            # So we have to stick `C` behind a unique alias for each requirement
+            # in the cluster for both the lib and the whl.
+
+            native.alias(
+                name = "_cluster_{}_lib_{}".format(cluster_name, requirement_name),
+                actual = lib_name,
+            )
+
+            native.alias(
+                name = "_cluster_{}_whl_{}".format(cluster_name, requirement_name),
+                actual = whl_name,
+            )

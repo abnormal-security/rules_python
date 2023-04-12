@@ -24,7 +24,6 @@ from python.runfiles import runfiles
 
 
 class AnnotationsTestCase(unittest.TestCase):
-
     maxDiff = None
 
     def test_annotations_constructor(self) -> None:

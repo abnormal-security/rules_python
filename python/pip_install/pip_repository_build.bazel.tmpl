@@ -1,0 +1,13 @@
+load("//:requirements.bzl", "install_clusters")
+
+package(default_visibility = ["//visibility:public"])
+
+# Ensure the `requirements.bzl` source can be accessed by stardoc, since users load() from it
+exports_files(["requirements.bzl"])
+
+# Invoke the dependency cluster macro to create the alias rules and wrapper libraries which implement dependency clustering
+install_clusters(
+  name = "%%NAME%%_clusters",
+)
+
+%%FOOTER%%
