@@ -15,7 +15,6 @@
 """Utility class to inspect an extracted wheel directory"""
 
 import email
-import pathlib
 import platform
 import re
 import sys
