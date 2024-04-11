@@ -15,6 +15,7 @@
 """Utility class to inspect an extracted wheel directory"""
 
 import email
+import pathlib
 import platform
 import re
 import sys
@@ -609,7 +610,7 @@ class Wheel:
         destination = installer.destinations.SchemeDictionaryDestination(
             installation_schemes,
             # TODO Should entry_point scripts also be handled by installer rather than custom code?
-            interpreter="python3",
+            interpreter="/dev/null",
             script_kind="posix",
             destdir=directory,
             bytecode_optimization_levels=[],
